@@ -78,3 +78,51 @@ SQL queries that power the Stage 1 endpoints:
 
 The priority inbox query uses a CASE statement to assign a number to each type so Placement sorts first, then Result, then Event. Within the same type it sorts by newest first.
 
+
+## Stage 3 — Query Optimization
+
+The given slow query:
+SELECT * FROM notifications WHERE studentID = 1042 AND isRead = false ORDER BY createdAt DESC;
+
+Is the query correct? Yes, it does what its supposed to do. It fetches all unread notifications for student 1042 sorted by newest first. But it is slow because the database has no index on studentID or isRead. So it does a full table scan, meaning it checks every single row in the notifications table to find matches. With 5 million rows this takes a long time. Also SELECT * fetches all columns including ones we might not need, which wastes memory.
+
+How to fix it — add a composite index on the columns we filter and sort by:
+CREATE INDEX idx_student_read_time ON notifications(studentID, isRead, createdAt DESC);
+
+This index lets the database jump directly to the rows for student 1042 where isRead is false, already sorted by createdAt. Instead of scanning 5 million rows it scans maybe 20. Also replace SELECT * with only the columns we actually need:
+SELECT id, type, message, createdAt FROM notifications WHERE studentID = 1042 AND isRead = false ORDER BY createdAt DESC;
+
+Is indexing every column a good idea? No. Indexes speed up reads but slow down writes. Every time a new notification is inserted or a notification is marked as read, all indexes on that table have to be updated. If you index every column, every write operation becomes expensive. The right approach is to only index columns that are frequently used in WHERE, ORDER BY, or JOIN clauses. For our case studentID, isRead, createdAt, and type are the ones worth indexing.
+
+Query to find all students who received a Placement notification in the last 7 days:
+SELECT DISTINCT s.id, s.name, s.email FROM students s
+JOIN notifications n ON s.id = n.studentID
+WHERE n.type = 'Placement' AND n.timestamp >= NOW() - INTERVAL '7 days';
+
+This joins the students and notifications tables, filters for Placement type within the last 7 days, and uses DISTINCT so each student appears only once even if they got multiple placement notifications.
+
+
+## Stage 4 — Performance and Caching
+
+Problem: notifications are fetched from the database on every page load. With 50K students refreshing their pages, the DB gets overwhelmed with repeated identical queries.
+
+Solution 1 — Redis Cache
+
+Store the recent notifications of each student in Redis (an in-memory key-value store). When a student opens the app, check Redis first. If the data is there, return it directly without touching the database. If its not there (cache miss), query the DB, return the result, and also store it in Redis with a TTL of say 2 minutes.
+
+Tradeoff: reads become very fast since Redis is in-memory. But we now have two sources of truth. When a new notification is created or one is marked as read, we have to invalidate or update the cache otherwise students see stale data. Adds complexity to the system.
+
+Solution 2 — Pagination
+
+Instead of loading all notifications at once, load them in small pages of 10 or 20. The query uses LIMIT and OFFSET so the database only processes a small chunk of data per request.
+
+Tradeoff: each individual query is fast and light on the DB. But the user has to click "load more" or scroll to see older notifications. Simple to implement with no extra infrastructure needed.
+
+Solution 3 — Database Connection Pooling
+
+Use a connection pool (like PgBouncer for PostgreSQL) to limit and reuse database connections. Without pooling, 50K simultaneous users could try to open 50K connections and crash the database. A pool keeps say 100 connections open and queues the rest.
+
+Tradeoff: prevents the DB from being overwhelmed by too many connections. But if the pool is too small, requests start waiting in the queue and response times increase.
+
+Best approach is to combine all three. Use Redis for caching hot data, pagination to keep queries small, and connection pooling to protect the database. Each one solves a different part of the problem.
+

@@ -49,30 +49,22 @@ async function main() {
   const vehicles = await fetchVehicles();
   await Log("backend", "info", "service", `Fetched ${vehicles.length} vehicle tasks`);
 
-  console.log("\n========================================");
-  console.log("   VEHICLE MAINTENANCE SCHEDULER");
-  console.log("========================================\n");
+  console.log("\n=== VEHICLE MAINTENANCE SCHEDULER ===\n");
 
   for (const depot of depots) {
     const budget = depot.MechanicHours;
     const { maxImpact, selected } = knapsack(vehicles, budget);
     const usedHours = selected.reduce((s, t) => s + t.Duration, 0);
+    const ids = selected.map(t => t.TaskID.split("-")[0]).join(", ");
 
-    console.log(`--- Depot ${depot.ID} (Budget: ${budget}h) ---`);
-    console.log(`Tasks selected: ${selected.length}/${vehicles.length}`);
-    console.log(`Hours used: ${usedHours}/${budget}`);
-    console.log(`Total Impact: ${maxImpact}`);
-    console.log(`Task IDs:`);
-    selected.forEach(t => console.log(`  ${t.TaskID} (dur=${t.Duration}, imp=${t.Impact})`));
-    console.log("");
+    console.log(`Depot ${depot.ID} | Budget: ${budget}h | Selected: ${selected.length}/${vehicles.length} tasks | Used: ${usedHours}/${budget}h | Impact: ${maxImpact}`);
+    console.log(`  IDs: ${ids}\n`);
 
     await Log("backend", "info", "handler", `Depot ${depot.ID}: ${selected.length} tasks, imp=${maxImpact}`);
   }
 
-  await Log("backend", "info", "service", "All depots processed successfully");
-  console.log("========================================");
-  console.log("   ALL DEPOTS PROCESSED SUCCESSFULLY");
-  console.log("========================================");
+  await Log("backend", "info", "service", "All depots processed");
+  console.log("=== DONE ===");
 }
 
 main().catch(async err => {

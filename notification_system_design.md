@@ -169,3 +169,18 @@ Redesigned pseudocode:
 
 What changed in the redesign. First, try-catch around each student so one failure doesnt kill the rest. Second, DB insert and email are separated so a failed email doesnt lose the notification. Third, processing in batches of 500 so we can track progress and resume if needed. Fourth, failed students go into a retry queue with exponential backoff instead of being silently skipped. Fifth, after max retries, permanently failed ones go to a dead letter queue where someone can manually check what went wrong.
 
+In a production system you would use a message queue like RabbitMQ or Kafka. The main service pushes notification jobs to the queue and worker processes pick them up one by one. If a worker crashes, the message stays in the queue and another worker picks it up. This is much more reliable than a simple for loop.
+
+
+## Stage 6 — Priority Inbox Algorithm
+
+The code is in the notification_app_be folder.
+
+Approach: I fetch notifications from the API separately for each type — Placement, Result, and Event. Then I merge all of them into a single array and sort by two rules. First by type priority where Placement is highest, then Result, then Event. Second, within the same type, newer notifications come first based on the Timestamp field.
+
+After sorting I pick the top 10 from the sorted list. This gives us the 10 most important and most recent unread notifications.
+
+I used a priority map { Placement: 1, Result: 2, Event: 3 } so the sort function compares numbers instead of strings. The sort is stable so notifications of the same type stay in recency order.
+
+The code also logs every step to the evaluation service using the logging middleware — when it starts, how many notifications it fetched per type, and the final result.
+

@@ -110,19 +110,62 @@ Solution 1 — Redis Cache
 
 Store the recent notifications of each student in Redis (an in-memory key-value store). When a student opens the app, check Redis first. If the data is there, return it directly without touching the database. If its not there (cache miss), query the DB, return the result, and also store it in Redis with a TTL of say 2 minutes.
 
-Tradeoff: reads become very fast since Redis is in-memory. But we now have two sources of truth. When a new notification is created or one is marked as read, we have to invalidate or update the cache otherwise students see stale data. Adds complexity to the system.
 
 Solution 2 — Pagination
 
 Instead of loading all notifications at once, load them in small pages of 10 or 20. The query uses LIMIT and OFFSET so the database only processes a small chunk of data per request.
 
-Tradeoff: each individual query is fast and light on the DB. But the user has to click "load more" or scroll to see older notifications. Simple to implement with no extra infrastructure needed.
 
 Solution 3 — Database Connection Pooling
 
 Use a connection pool (like PgBouncer for PostgreSQL) to limit and reuse database connections. Without pooling, 50K simultaneous users could try to open 50K connections and crash the database. A pool keeps say 100 connections open and queues the rest.
 
-Tradeoff: prevents the DB from being overwhelmed by too many connections. But if the pool is too small, requests start waiting in the queue and response times increase.
 
 Best approach is to combine all three. Use Redis for caching hot data, pagination to keep queries small, and connection pooling to protect the database. Each one solves a different part of the problem.
+
+
+## Stage 5 — Fault Tolerance
+
+The broken pseudocode given:
+
+  for each student in all_50000_students:
+      send_email(student, notification)
+      insert_into_db(student, notification)
+      send_in_app_push(student, notification)
+
+send_email failed at student #24800. The loop crashes and the remaining 25200 students get nothing.
+
+What went wrong? Three main issues. First, there is no try-catch or error handling. One failure kills the entire loop. Second, all 50000 students are processed in a single loop with no batching. If anything goes wrong midway there is no way to resume from where it stopped. Third, email sending is an external network call that can fail for many reasons like SMTP timeout, rate limiting, or server downtime. Treating it the same as a local DB insert is a mistake.
+
+Should email and DB insert happen together? No, they should be separate. The DB insert is a local operation that is fast and reliable. Email sending is an external call that depends on a third party SMTP server which can fail, be slow, or rate limit you. If you put them in the same transaction and the email fails, the DB insert also rolls back and the student loses the notification entirely. Better to save the notification to DB first (so the student can see it in-app) and then send the email separately. If the email fails, the notification is still saved and you can retry the email later.
+
+Redesigned pseudocode:
+
+  failed_queue = []
+
+  batches = split_into_batches(all_50000_students, batch_size=500)
+
+  for each batch in batches:
+      for each student in batch:
+          try:
+              insert_into_db(student, notification)
+              send_in_app_push(student, notification)
+          catch error:
+              log_error(student, error)
+              failed_queue.push({ student, step: "db_or_push" })
+              continue
+
+          try:
+              send_email(student, notification)
+          catch error:
+              log_error(student, error)
+              failed_queue.push({ student, step: "email" })
+              continue
+
+  // retry failed ones
+  for each item in failed_queue:
+      retry with exponential backoff (max 3 attempts)
+      if still failing, move to dead_letter_queue for manual review
+
+What changed in the redesign. First, try-catch around each student so one failure doesnt kill the rest. Second, DB insert and email are separated so a failed email doesnt lose the notification. Third, processing in batches of 500 so we can track progress and resume if needed. Fourth, failed students go into a retry queue with exponential backoff instead of being silently skipped. Fifth, after max retries, permanently failed ones go to a dead letter queue where someone can manually check what went wrong.
 
